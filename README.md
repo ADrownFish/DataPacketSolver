@@ -5,7 +5,15 @@ Packet encapsulation and parsing module, provides data packet construction and a
 ---
 
 ## Build and Run
+---
 
+## Important Note
+
+Please ensure that the buffer size meets the requirements before using.  
+- **For the C version version, modify the `BUFFER_SIZE` macro in `DataPacketSolver.h`.**
+- **For the C++ version, specify the template parameter during construction.**
+
+---
 ### Build Steps
 
 1. It is recommended to use a C++17-compliant compiler and `CMake` (>= 3.0.2).  
