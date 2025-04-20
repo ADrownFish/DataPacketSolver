@@ -43,10 +43,29 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 
+#include <string>
 #include <string.h>
 #include <stdint.h>
 #include <cstdlib>
 #include <cassert>
+
+ // 预取指令支持
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#define PREFETCH(addr) _mm_prefetch(reinterpret_cast<const char*>(addr), _MM_HINT_T0)
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define PREFETCH(addr) __builtin_prefetch(addr, 0, 3)
+#else
+#define PREFETCH(addr)
+#endif
+
+ // 强制内联
+#if defined(_MSC_VER)
+#define FORCE_INLINE __forceinline
+#else
+#define FORCE_INLINE inline __attribute__((always_inline))
+#endif
 
 #ifdef DATAPACKETSOLVER_PRINT_OPTIONS
 #include <iostream>
@@ -60,9 +79,11 @@ namespace robot
 {
   class CRC8;
   class CRC16;
-  class CRC24;
   class CRC16_CCITT;
+  class CRC24;
   class CRC32;
+
+  class XORCrypto;
 
   /*
   * @class DataPacketSolver
@@ -83,20 +104,19 @@ namespace robot
   * 
   */
 
-  template <int BufferSize, int MaxReceiveQueueSize, typename CRCFunction = CRC32>
+  template <int BufferSize, int MaxReceiveQueueSize, typename CRCFunction = CRC32, typename CryptoFunction = void /* XORCrypto */>
   class DataPacketSolver{
     static_assert(BufferSize >= 1 && BufferSize <= 65000, "[DataPacketSolver] BufferSize must be between 1 and 65000");
     static_assert(MaxReceiveQueueSize >= 1 && MaxReceiveQueueSize <= 65000, "[DataPacketSolver] MaxReceiveQueueSize must be between 1 and 65000");
 
   public:
 
-    struct ByteArrayPointer
-    {
+    struct ByteArrayPointer {
       uint32_t size = 0x00;    // 数组大小
       uint8_t *data = nullptr; // 数组指针
     };
     
-    class Head{
+    class Head {
     public:
       Head() = default;
       uint8_t srcID = 0x00;  // 发送者ID
@@ -104,14 +124,14 @@ namespace robot
       uint8_t DataID = 0x00; // 标识数据包的ID
     };
     
-    class Data{
+    class Data {
     public:
       Head head;
       uint16_t length = 0x00;
       uint8_t data[BufferSize] = {};
 
     public:
-      void clear(){
+        inline void clear(){
         length = 0;
       }
       /**
@@ -120,11 +140,11 @@ namespace robot
        * @param _dstID 目标者ID
        * @param _dataID 数据包ID
        */
-      void setHead(uint8_t _dstID, uint8_t _dataID){
+      inline void setHead(uint8_t _dstID, uint8_t _dataID){
         head.dstID = _dstID;
         head.DataID = _dataID;
       }
-      void setHead(uint8_t _srcID ,uint8_t _dstID, uint8_t _dataID){
+      inline void setHead(uint8_t _srcID ,uint8_t _dstID, uint8_t _dataID){
         head.srcID = _srcID;
         head.dstID = _dstID;
         head.DataID = _dataID;
@@ -135,7 +155,7 @@ namespace robot
        *
        * @param _head 待设置的头部信息
        */
-      void setHead(Head _head){
+      inline void setHead(Head _head){
         head.srcID = _head.srcID;
         head.dstID = _head.dstID;
         head.DataID = _head.DataID;
@@ -147,7 +167,7 @@ namespace robot
        * @param _data 指向数据的指针
        * @param _dataLength 数据的长度 
        */
-      void appendData(const void *_data, uint16_t _dataLength){
+      inline void appendData(const void *_data, uint16_t _dataLength){
         assert(_dataLength != 0);
 
         if (length + _dataLength > BufferSize){
@@ -169,7 +189,7 @@ namespace robot
        * @param _size 数据个数
        */
       template <typename T>
-      void appendData(const T *_data, uint16_t _size){
+      inline void appendData(const T *_data, uint16_t _size){
         assert(_size != 0);
 
         uint16_t __size = sizeof(T) * _size;
@@ -178,7 +198,7 @@ namespace robot
       }
 
       template <typename T>
-      void appendData(const T &_data){
+      inline void appendData(const T &_data){
         uint16_t __size = sizeof(T);
         const void *__data = &_data;
         appendData(__data, __size);
@@ -197,7 +217,7 @@ namespace robot
        * \endcode
        */
       template <typename T, typename... Args>
-      void appendData(Args... args){  
+      inline void appendData(Args... args){
         T _data[sizeof...(args)] = {static_cast<T>(args)...}; // 将参数包展开到数组中
         uint16_t _size = sizeof(_data);                       // 计算数据大小
         const void *__data = _data;
@@ -248,11 +268,11 @@ namespace robot
       Data _recv_buffer_array[MaxReceiveQueueSize];
 
     public:
-      size_t size() const{
+      inline int size() const{
         return buffer_size;
       }
 
-      void push(const Data &dps){
+      inline void push(const Data &dps){
         if (buffer_size < MaxReceiveQueueSize)
         {
           buffer_size++;
@@ -267,7 +287,7 @@ namespace robot
         endPos = (endPos + 1) % MaxReceiveQueueSize;
       }
 
-      Data &pop(){
+      inline Data &pop(){
         if (buffer_size == 0){
           static Data data{};
           return data;
@@ -282,14 +302,14 @@ namespace robot
 
   private:
 
-    static constexpr uint8_t _HEAD_FLAG[] = {0xAA,0xBB,0xCC,0xDD};
-    static constexpr uint8_t _HEAD_FLAG_LENGTH = sizeof(_HEAD_FLAG);
-    static constexpr uint8_t _Head_LENGTH = sizeof(Head);
-    static constexpr uint8_t _DATA_LENGTH = sizeof(uint16_t);
-    static constexpr uint8_t _FIXED_LENGTH = _HEAD_FLAG_LENGTH + _Head_LENGTH + _DATA_LENGTH;  // fram 4 head 3 length 2 = 9
-    static constexpr uint8_t _MAX_CRC_LENGTH = CRCFunction::_CRC_LENGTH;
-    static constexpr uint8_t _MAX_PADDING_LENGTH = _FIXED_LENGTH + _MAX_CRC_LENGTH;
-    static constexpr uint8_t _MAX_FIXED_LENGTH = _MAX_PADDING_LENGTH + BufferSize;
+    uint8_t _HEAD_FLAG[4] = {0x55,0xAA,0xAA,0x55};
+    static constexpr uint16_t _HEAD_FLAG_LENGTH = sizeof(_HEAD_FLAG);
+    static constexpr uint16_t _HEAD_LENGTH = sizeof(Head);
+    static constexpr uint16_t _DATA_LENGTH = sizeof(uint16_t);
+    static constexpr uint16_t _FIXED_LENGTH = _HEAD_FLAG_LENGTH + _HEAD_LENGTH + _DATA_LENGTH;  // fram 4 head 3 length 2 = 9
+    static constexpr uint16_t _MAX_CRC_LENGTH = CRCFunction::_CRC_LENGTH;
+    static constexpr uint16_t _MAX_PADDING_LENGTH = _FIXED_LENGTH + _MAX_CRC_LENGTH;
+    static constexpr uint16_t _MAX_FIXED_LENGTH = _MAX_PADDING_LENGTH + BufferSize;
 
     bool _enableCache = false;
     bool _enableFilter = true;
@@ -314,6 +334,7 @@ namespace robot
     DataQueue _recv_dataPacket_queue;
 
     CRCFunction crc_;
+    CryptoFunction *crypto_;
 
   public:
     /**
@@ -326,21 +347,27 @@ namespace robot
       _deviceID = deviceID;
       _enableFilter = enableFilter;
 
+      if constexpr (!std::is_void<CryptoFunction>::value) {
+        crypto_ = new CryptoFunction();
+      }
+
       init();
     }
     DataPacketSolver(){
-      init();
+        init();
     }
-    ~DataPacketSolver(){
-      
-    }
+	~DataPacketSolver() {
+	    if constexpr (!std::is_void<CryptoFunction>::value) {
+		    delete crypto_;
+		}
+	}
 
     /**
      * @brief 压入一个字节，尝试解析
      * @param byte 用于解包的字节
      * @return 解包成功 true  失败 false
      */
-    bool pushByte(uint8_t byte){
+    inline bool pushByte(uint8_t byte){
 #ifdef DATAPACKETSOLVER_PRINT_OPTIONS
       auto _print__ = [this](bool ok)
       {
@@ -377,10 +404,15 @@ namespace robot
       if (_enableCache){
         _recv_buffer_raw[receivedBufferLength++] = byte;
 
+        uint16_t recvBufferLength = _recv_buffer_raw[7] + (_recv_buffer_raw[8] << 8);
         if(receivedBufferLength > (_MAX_FIXED_LENGTH)){
           init();          
         }else if (receivedBufferLength >= _MAX_PADDING_LENGTH &&
-                  (_recv_buffer_raw[7] + (_recv_buffer_raw[8] << 8)) == (receivedBufferLength - _MAX_PADDING_LENGTH)){
+            recvBufferLength == (receivedBufferLength - _MAX_PADDING_LENGTH)){
+
+        if constexpr (!std::is_void<CryptoFunction>::value) {
+            crypto_->encrypt(&_recv_buffer_raw[9], recvBufferLength);
+        }
 
           uint32_t _crcRes = crc_.crc(_recv_buffer_raw, receivedBufferLength - _MAX_CRC_LENGTH);
           const uint8_t* pCRC = ((uint8_t *)&_crcRes);
@@ -438,7 +470,7 @@ namespace robot
      * @param length 用于解包的字节长度
      * @return 无返回
      */
-    void pushBytes(const uint8_t *data, uint16_t length){
+    inline void pushBytes(const uint8_t *data, uint16_t length){
       for (uint16_t i = 0; i < length; i++){
         pushByte(data[i]);
       }
@@ -449,7 +481,7 @@ namespace robot
      * @brief 是否可用包
      * @return true false
      */
-    int getAvailableSize() const{
+    inline int getAvailableSize() const{
       return _recv_dataPacket_queue.size();
     }
 
@@ -457,7 +489,7 @@ namespace robot
      * @brief 获取一个包
      * @return 有可用返回结构体 无可用返回空结构
      */
-    const Data &getFirstDataPacket(){
+    inline const Data &getFirstDataPacket(){
       return _recv_dataPacket_queue.pop();
     }    
 
@@ -466,7 +498,7 @@ namespace robot
      * @param data 用于构造的数据结构
      * @return 构造完成的数据流
      */
-    const ByteArrayPointer makeDataPacket(const Data &data){
+    inline const ByteArrayPointer makeDataPacket(const Data &data){
       ByteArrayPointer dpba;
       const uint16_t totalByteSize = _FIXED_LENGTH + data.length + _MAX_CRC_LENGTH;
 
@@ -493,6 +525,10 @@ namespace robot
         _send_buffer_raw[_FIXED_LENGTH + i] = (data.data[i]);
       }
 
+      if constexpr (!std::is_void<CryptoFunction>::value) {
+          crypto_->decrypt(&_send_buffer_raw[9], data.length);
+      }
+      
       uint32_t _crcRes = crc_.crc(_send_buffer_raw, totalByteSize - _MAX_CRC_LENGTH);
       const uint8_t* pCRC = ((uint8_t *)&_crcRes);      
 
@@ -538,13 +574,20 @@ namespace robot
       _enableFilter = enableFilter;
     }
 
+    inline void setFrameHeader(uint8_t head_0, uint8_t head_1, uint8_t head_2, uint8_t head_3) {
+        _HEAD_FLAG[0] = head_0;
+        _HEAD_FLAG[1] = head_1;
+        _HEAD_FLAG[2] = head_2;
+        _HEAD_FLAG[3] = head_3;
+    }
+
 #ifdef DATAPACKETSOLVER_PRINT_OPTIONS
     /**
      * @brief 设置开启接收数据打印
      * @param ok 是否
      * @return noreturn
      */
-    void setEnablePrintReceive(bool ok){
+    inline void setEnablePrintReceive(bool ok){
       _enablePrintRecv = ok;
     }
 
@@ -553,7 +596,7 @@ namespace robot
      * @param ok 是否
      * @return noreturn
      */
-    void setEnablePrintSend(bool ok){
+    inline void setEnablePrintSend(bool ok){
       _enablePrintSend = ok;
     }
 
@@ -573,34 +616,34 @@ namespace robot
      * @param byte 用于判定帧头的字节
      * @return 连续判断满足帧头条件则返回 true
      */
-    bool FrameheaderSniffing(uint8_t byte){
-      constexpr uint8_t _Offset_Uint = 0x01;
+	  inline bool FrameheaderSniffing(uint8_t byte) {
+          constexpr uint8_t _Offset_Uint = 0x01;
 
-      if (byte == _HEAD_FLAG[3] && _SniffingProgress == _Offset_Uint << 2){
-        _SniffingProgress = _Offset_Uint << 3;
-        return true;
-      }
-      else if (byte == _HEAD_FLAG[2] && _SniffingProgress == _Offset_Uint << 1){
-        _SniffingProgress = _Offset_Uint << 2;
-      }
-      else if (byte == _HEAD_FLAG[1] && _SniffingProgress == _Offset_Uint << 0){
-        _SniffingProgress = _Offset_Uint << 1;
-      }
-      else if (byte == _HEAD_FLAG[0]){
-        _SniffingProgress = _Offset_Uint;
-      }
-      else{
-        _SniffingProgress = 0;
-      }
+          if (byte == _HEAD_FLAG[3] && _SniffingProgress == _Offset_Uint << 2){
+            _SniffingProgress = _Offset_Uint << 3;
+            return true;
+          }
+          else if (byte == _HEAD_FLAG[2] && _SniffingProgress == _Offset_Uint << 1){
+            _SniffingProgress = _Offset_Uint << 2;
+          }
+          else if (byte == _HEAD_FLAG[1] && _SniffingProgress == _Offset_Uint << 0){
+            _SniffingProgress = _Offset_Uint << 1;
+          }
+          else if (byte == _HEAD_FLAG[0]){
+            _SniffingProgress = _Offset_Uint;
+          }
+          else{
+            _SniffingProgress = 0;
+          }
 
-      return false;
-    }
+          return false;
+	  }
 
     /**
      * @brief 初始化所有，不用调用，内部会自动调用
      * @return 成功 true 失败 false
      */
-    bool init(){
+    inline bool init(){
       receivedBufferLength = 0;
       _enableCache = false;
 
@@ -608,125 +651,90 @@ namespace robot
     }
   };
 
-  /**
-   * @class CRCBase
-   * @brief 通用的CRC（循环冗余校验）基类。
-   * 
-   * 提供灵活的CRC计算功能，包括多项式、初始值、异或输出值、位反射支持等。
-   * 通过派生子类，可以方便地实现常见的CRC算法。
-   * 
-   * 参数说明：
-   * - polynomial: 用于计算CRC的多项式。
-   * - initial_value: 初始化时的CRC值。
-   * - xor_out_value: 最终输出的异或值。
-   * - reflect_in: 是否对输入数据字节进行位反射。
-   * - reflect_out: 是否对最终计算结果进行位反射。
-   * - width: CRC的位宽（如8位、16位等）。
-   */
-  class CRCBase {
+  /******************************************************************************
+   * Name:    CRC-8               x8+x2+x+1
+   * Poly:    0x07
+   * Init:    0x00
+   * Refin:   False
+   * Refout:  False
+   * Xorout:  0x00
+   * Note:
+   *****************************************************************************/
+  class CRC8  {
   public:
-    CRCBase(uint32_t poly, uint32_t init, uint32_t xor_out, bool reflect_in,
-            bool reflect_out, uint8_t width)
-        : polynomial(poly), initial_value(init), xor_out_value(xor_out),
-          reflect_in(reflect_in), reflect_out(reflect_out), width(width) {
-      createTable();
-    }
-
-    virtual uint32_t crc(const uint8_t *bytes, size_t size) {
-      uint32_t crc = initial_value;
-      for (size_t i = 0; i < size; ++i) {
-        uint8_t byte = reflect_in ? reflect(bytes[i], 8) : bytes[i];
-        crc = (crc >> 8) ^ table[(crc ^ byte) & 0xFF];
-      }
-      crc = reflect_out ? reflect(crc, width) : crc;
-      return (crc ^ xor_out_value) & ((1UL << width) - 1);
-    }
-
-  protected:
-    uint32_t polynomial;
-    uint32_t initial_value;
-    uint32_t xor_out_value;
-    bool reflect_in;
-    bool reflect_out;
-    uint8_t width;
-    uint32_t table[256];
-
-    void createTable() {
-      for (uint16_t i = 0; i < 256; ++i) {
-        uint32_t crc = i;
-        for (uint8_t j = 0; j < 8; ++j) {
-          if (crc & 1) {
-            crc = (crc >> 1) ^ polynomial;
-          } else {
-            crc >>= 1;
-          }
-        }
-        table[i] = crc;
-      }
-    }
-
-    uint32_t reflect(uint32_t data, uint8_t bits) {
-      uint32_t reflection = 0;
-      for (uint8_t i = 0; i < bits; ++i) {
-        if (data & (1 << i)) {
-          reflection |= (1 << (bits - 1 - i));
+    CRC8(){}
+    uint32_t crc(uint8_t *bytes, size_t size) {
+      uint8_t i;
+      uint8_t crc = 0; // Initial value
+      while (size--) {
+        crc ^= *bytes++; // crc ^= *data; data++;
+        for (i = 0; i < 8; i++) {
+          if (crc & 0x80)
+            crc = (crc << 1) ^ 0x07;
+          else
+            crc <<= 1;
         }
       }
-      return reflection;
+      return crc;
     }
-  };
-
-  /**
-   * @class CRC8
-   * @brief 实现CRC-8标准。
-   * 
-   * 标准配置：
-   * - 多项式：0x07 (x^8 + x^2 + x + 1)
-   * - 初始值：0x00
-   * - 异或输出值：0x00
-   * - 输入反射：否
-   * - 输出反射：否
-   * - 位宽：8位
-   */
-  class CRC8 : public CRCBase {
-  public:
-    CRC8() : CRCBase(0x07, 0x00, 0x00, false, false, 8) {}
     static constexpr uint32_t _CRC_LENGTH = 1;
   };
 
-  /**
-   * @class CRC16
-   * @brief 实现CRC-16-MODBUS标准。
-   * 
-   * 标准配置：
-   * - 多项式：0x8005 (x^16 + x^15 + x^2 + 1)
-   * - 初始值：0x0000
-   * - 异或输出值：0x0000
-   * - 输入反射：是
-   * - 输出反射：是
-   * - 位宽：16位
-   */
-  class CRC16 : public CRCBase {
+  /******************************************************************************
+   * Name:    CRC-16/MODBUS       x16+x15+x2+1
+   * Poly:    0x8005
+   * Init:    0xFFFF
+   * Refin:   True
+   * Refout:  True
+   * Xorout:  0x0000
+   * Note:
+   *****************************************************************************/
+  class CRC16  {
   public:
-    CRC16() : CRCBase(0x8005, 0x0000, 0x0000, true, true, 16) {}
+    CRC16(){}
+    uint32_t crc(uint8_t *bytes, size_t size) {
+      uint8_t i;
+      uint16_t crc = 0xffff; // Initial value
+      while (size--) {
+        crc ^= *bytes++; // crc ^= *data; data++;
+        for (i = 0; i < 8; ++i) {
+          if (crc & 1)
+            crc = (crc >> 1) ^ 0xA001; // 0xA001 = reverse 0x8005
+          else
+            crc = (crc >> 1);
+        }
+      }
+      return crc;
+    }
     static constexpr uint32_t _CRC_LENGTH = 2;
   };
 
-  /**
-   * @class CRC16_CCITT
-   * @brief 实现CRC-16-CCITT标准（Kermit变体）。
-   * 
-   * 标准配置：
-   * - 多项式：0x1021 (x^16 + x^12 + x^5 + 1)
-   * - 初始值：0xFFFF
-   * - 异或输出值：0x0000
-   * - 输入反射：否
-   * - 输出反射：否
-   * - 位宽：16位
-   */
-  class CRC16_CCITT : public CRCBase {
+  /******************************************************************************
+   * Name:    CRC-16/CCITT        x16+x12+x5+1
+   * Poly:    0x1021
+   * Init:    0x0000
+   * Refin:   True
+   * Refout:  True
+   * Xorout:  0x0000
+   * Alias:   CRC-CCITT,CRC-16/CCITT-TRUE,CRC-16/KERMIT
+   *****************************************************************************/
+  class CRC16_CCITT  {
   public:
-      CRC16_CCITT() : CRCBase(0x1021, 0xFFFF, 0x0000, false, false, 16) {}
+      CRC16_CCITT(){}
+      uint32_t crc(uint8_t *bytes, size_t size) {
+        uint8_t i;
+        uint16_t crc = 0; // Initial value
+        while (size--) {
+          crc ^= *bytes++; // crc ^= *data; data++;
+          for (i = 0; i < 8; ++i) {
+            if (crc & 1)
+              crc = (crc >> 1) ^ 0x8408; // 0x8408 = reverse 0x1021
+            else
+              crc = (crc >> 1);
+          }
+        }
+        return crc;
+      }
       static constexpr uint32_t _CRC_LENGTH = 2;
   };
 
@@ -742,28 +750,94 @@ namespace robot
    * - 输出反射：否
    * - 位宽：24位
    */
-  class CRC24 : public CRCBase {
+  class CRC24  {
   public:
-    CRC24() : CRCBase(0x864CFB, 0xB704CE, 0x000000, false, false, 24) {}
+    CRC24(){}
     static constexpr uint32_t _CRC_LENGTH = 3;
   };
 
-  /**
-   * @class CRC32
-   * @brief 实现CRC-32标准（IEEE 802.3）。
-   * 
-   * 标准配置：
-   * - 多项式：0x04C11DB7 (x^32 + x^26 + x^23 + x^22 + x^16 + x^12 + x^11 + x^10 + x^8 + x^7 + x^5 + x^4 + x^2 + x + 1)
-   * - 初始值：0xFFFFFFFF
-   * - 异或输出值：0xFFFFFFFF
-   * - 输入反射：是
-   * - 输出反射：是
-   * - 位宽：32位
-   */
-  class CRC32 : public CRCBase {
+  /******************************************************************************
+   * Name:    CRC-32  x32+x26+x23+x22+x16+x12+x11+x10+x8+x7+x5+x4+x2+x+1
+   * Poly:    0x4C11DB7
+   * Init:    0xFFFFFFF
+   * Refin:   True
+   * Refout:  True
+   * Xorout:  0xFFFFFFF
+   * Alias:   CRC_32/ADCCP
+   * Use:     WinRAR,ect.
+   *****************************************************************************/
+  class CRC32  {
   public:
-    CRC32() : CRCBase(0x04C11DB7, 0xFFFFFFFF, 0xFFFFFFFF, true, true, 32) {}
+    CRC32() {}
+    uint32_t crc(uint8_t *bytes, size_t size) {
+      uint8_t i;
+      uint32_t crc = 0xffffffff; // Initial value
+      while (size--) {
+        crc ^= *bytes++; // crc ^= *data; data++;
+        for (i = 0; i < 8; ++i) {
+          if (crc & 1)
+            crc = (crc >> 1) ^ 0xEDB88320; // 0xEDB88320= reverse 0x04C11DB7
+          else
+            crc = (crc >> 1);
+        }
+      }
+      return ~crc;
+    }
     static constexpr uint32_t _CRC_LENGTH = 4;
   };
 
+  /******************************************************************************
+   * Name:    CRC-32/MPEG-2  x32+x26+x23+x22+x16+x12+x11+x10+x8+x7+x5+x4+x2+x+1
+   * Poly:    0x4C11DB7
+   * Init:    0xFFFFFFF
+   * Refin:   False
+   * Refout:  False
+   * Xorout:  0x0000000
+   * Note:
+   *****************************************************************************/
+  class CRC32_MPEG_2  {
+  public:
+    CRC32_MPEG_2() {}
+    uint32_t crc(uint8_t *bytes, size_t size) {
+      uint8_t i;
+      uint32_t crc = 0xffffffff; // Initial value
+      while (size--) {
+        crc ^= (uint32_t)(*bytes++)
+               << 24; // crc ^=(uint32_t)(*data)<<24; data++;
+        for (i = 0; i < 8; ++i) {
+          if (crc & 0x80000000)
+            crc = (crc << 1) ^ 0x04C11DB7;
+          else
+            crc <<= 1;
+        }
+      }
+      return crc;
+    }
+    static constexpr uint32_t _CRC_LENGTH = 4;
+  };
 }
+
+class XORCrypto  {
+public:
+    XORCrypto(){}
+    XORCrypto(const std::string &key)
+        : key_(key) {}
+
+    inline void encrypt(uint8_t* buf, size_t len) {
+        xorData(buf, len);
+    }
+
+    inline void decrypt(uint8_t* buf, size_t len) {
+        xorData(buf, len); // 对称操作
+    }
+
+private:
+    std::string key_ = "simple key";
+
+    FORCE_INLINE void xorData(uint8_t* buf, size_t len) {
+        for (size_t i = 0; i < len; ++i) {
+            PREFETCH(&buf[i + 8]);
+            buf[i] ^= key_[i % key_.size()];
+        }
+    }
+};
